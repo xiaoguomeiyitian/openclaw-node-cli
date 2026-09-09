@@ -113,7 +113,8 @@ function parseOut(raw) {
 // ---- Tab 补全:发去节点跑 ls -d,取候选 ----
 async function completeToken(token) {
   if (isWindows) return null;
-  const full = cwd ? `${cwd}/${token}` : token;
+  // 绝对路径(token 以 / 开头)不拼 cwd 前缀;相对路径才拼 cwd
+  const full = token.startsWith("/") ? token : (cwd ? `${cwd}/${token}` : token);
   let dirPart, base;
   if (full.includes("/")) {
     dirPart = full.slice(0, full.lastIndexOf("/")) || "/";
@@ -376,7 +377,9 @@ async function runRawMode() {
   }
 
   function isDirectory(name) {
-    return runOnNode({ nodeId, command: `[ -d ${JSON.stringify(cwd ? cwd + "/" + name : name)} ] && echo yes || echo no`, timeoutMs: 5000 })
+    // name 可能是补全出的相对名字;判断时同样区分绝对/相对路径
+    const p = name.startsWith("/") ? name : (cwd ? cwd + "/" + name : name);
+    return runOnNode({ nodeId, command: `[ -d ${JSON.stringify(p)} ] && echo yes || echo no`, timeoutMs: 5000 })
       .then((r) => (r.stdout || "").trim() === "yes");
   }
 
