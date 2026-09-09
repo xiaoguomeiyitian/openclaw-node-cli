@@ -155,13 +155,21 @@ Tab 补全的 glob 特例:引号包 base 主体、`*` 留引号外(`'fo'*`)。ba
 
 ## Windows 节点支持(2026-09-09 实测通过)
 
-`runOnNode` 接受 `platform` 参数,Windows 节点命令包装为 `cmd /d /c <command>`
-(`/d` 禁用注册表 AutoRun,防意外的恶意预执行):
+`runOnNode` 接受 `platform` 参数,Windows 节点命令包装为
+`powershell -NoProfile -NonInteractive -Command <command>`
+(`-NoProfile` 不加载用户 profile,快 + 防意外预执行;`-NonInteractive` 防挂起):
 
 - 调用方必须传 `node.platform`(node-shell 三处 / node-exec 一处均已传);
 - 直连形态 `node gw-sysrun.mjs <nodeId> <command...> [linux|windows]` 兼容旧无 platform 形态;
 - Windows 下无 cwd 持久化、无 Tab 补全、无 `__RC` 信标(直接透传 exitCode);
 - 已在真实 Windows 节点实测:`echo %USERNAME% && ver && cd`、`dir /b | findstr`、
   错误命令(stderr + exitCode=1)均正常。
-- 注意:cmd 的 `&&` 与 bash 语义一致,但 `||`/变量语法不同;写命令时按 cmd 习惯。
+- 注意:**Windows PowerShell 5.1 不支持 `&&`**(PS7+ 才支持;节点实测无 pwsh 7),
+  多条命令用 `;` 分隔;需要 bash 风格 `cmd1 && cmd2` 时用
+  `if ($?) { cmd2 }` 或 `cmd1; if ($LASTEXITCODE -eq 0) { cmd2 }`。
+- 退出码:外部命令用 `exit $LASTEXITCODE` 透传;PS 内部命令失败(如 cmdlet 不存在)
+  会以非零退出;`$?`/`$LASTEXITCODE` 语义不同,别混用。
+- 变量/语法按 PS 习惯:`$env:USERNAME`(非 `%USERNAME%`)、`Get-ChildItem`(别名 `ls`
+  行为不同!PS 的 `ls` 默认不带 `-Force` 参数语法,`ls -la` 会报错,用 `dir` 或
+  `Get-ChildItem -Force`)。
 - profile 切换测试后记得切回常用节点(测试中已切回 byServer)。
