@@ -6,5 +6,5 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NODE_BIN="$(command -v node)" || { echo "未找到 node 命令"; exit 1; }
 
-# 调用同目录的 node-term.mjs(真正的逻辑)
-exec "$NODE_BIN" "$DIR/node-term.mjs"
+# 调用同目录的 node-term.mjs(真正的逻辑);透传全部参数(如 --gateway)
+exec "$NODE_BIN" "$DIR/node-term.mjs" "$@"

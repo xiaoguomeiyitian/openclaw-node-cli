@@ -173,3 +173,30 @@ Tab 补全的 glob 特例:引号包 base 主体、`*` 留引号外(`'fo'*`)。ba
   行为不同!PS 的 `ls` 默认不带 `-Force` 参数语法,`ls -la` 会报错,用 `dir` 或
   `Get-ChildItem -Force`)。
 - profile 切换测试后记得切回常用节点(测试中已切回 byServer)。
+
+## 残留进程事故复盘(2026-09-09)
+
+现象:退出后发现 node-term / gateway-term / node-shell 进程残留(9/8 起存活,WS 仍
+ESTABLISHED,内层还挂着嵌套 bash -l)。
+
+根因(两个叠加):
+
+1. **嵌套持久终端**:在 Control UI 的网关终端(`OPENCLAW_TERMINAL=1` 环境)里跑
+   `./cli.sh --gateway`,等于「持久终端里再开持久终端」。网关终端会话是断线重连
+   设计,关浏览器 tab 不杀链;用户退出方式是关页面而非内层 `exit`,整条链就残留。
+   CPU 不自旋(实测 0%),但 ~9MB/个的 RSS 一直占着。
+2. **cli.sh 没透传参数**:`exec node node-term.mjs` 少了 `"$@"`,`--gateway` 从未
+   经 cli.sh 生效过(嵌套那次应是直接调 node-term.mjs 进的)。顺带修复。
+
+修复(均已实测):
+
+- `cli.sh`:`exec ... "$@"` 透传全部参数;
+- `node-term.mjs`:`--gateway` + `OPENCLAW_TERMINAL=1` 时直接拒绝并引导(嵌套防护);
+- `gateway-term.mjs`:补 `SIGHUP` 处理 + 非 TTY 下 stdin `end`/`error` 兜底 —— 宿主
+   终端消失/管道关闭时走 cleanup(terminal.close + ws.close),不再残留;
+- 清理存量残留:`kill -TERM <gateway-term pids>`(SIGTERM → cleanup → 连内层嵌套
+   终端一并 terminal.close;实测 WS 全断、无残留)。
+
+排查手段(容器里没有 ss/fuser/strace 时):`/proc/<pid>/fd` readlink 找 socket →
+`/proc/<pid>/net/tcp` 按 inode 匹配(0100007F:4E20 = 127.0.0.1:20000,状态 01
+= ESTABLISHED);`wchan` 看是否自旋(ep_poll=正常 epoll 等待)。

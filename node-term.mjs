@@ -14,6 +14,17 @@ const GATEWAY_TERM = join(DIR, "gateway-term.mjs");
 const NODE_SHELL = join(DIR, "node-shell.mjs");
 const useGateway = process.argv.includes("--gateway");
 
+// ---- 嵌套防护:已在网关持久终端(OPENCLAW_TERMINAL=1)里时,--gateway 会造成
+// 「持久终端套持久终端」——关浏览器 tab 不会断链,残留进程会一直活着。
+// 这种场景下直接拒绝并引导用户用节点 shell(默认模式)。
+if (useGateway && process.env.OPENCLAW_TERMINAL === "1") {
+  console.log("当前已在网关持久终端里(OPENCLAW_TERMINAL=1)。");
+  console.log("再开 --gateway 会嵌套持久终端,关闭页面后进程会残留,已阻止。");
+  console.log("操作节点请直接用默认节点 shell: ./cli.sh");
+  console.log("(如确实需要新开一个网关终端,请在 Control UI 新开终端窗口)");
+  process.exit(1);
+}
+
 function listNodes() {
   return new Promise((resolve, reject) => {
     const p = spawn("openclaw", ["nodes", "status", "--connected", "--json"], { shell: false });
@@ -32,6 +43,7 @@ function listNodes() {
     });
   });
 }
+
 
 const nodes = await listNodes();
 if (nodes.length === 0) {

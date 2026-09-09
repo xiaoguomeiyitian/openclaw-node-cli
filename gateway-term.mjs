@@ -105,6 +105,15 @@ ws.onopen = async () => {
       try { ws.send(JSON.stringify({ type: "req", id: String(nextId++), method: "terminal.input", params: { sessionId, data: "\x03" } })); } catch {}
     });
     process.on("SIGTERM", cleanup);
+    // 宿主终端(Control UI 终端页/父 shell)消失时兜底退出:
+    // 网关终端会话是持久化设计,断线不关闭;客户端若不感知 SIGHUP/EOF 就会残留。
+    process.on("SIGHUP", cleanup);
+    if (!process.stdin.isTTY) {
+      // 管道模式下宿主关闭 stdin 即视为终端链消失,同样走 cleanup
+      process.stdin.on("end", () => cleanup());
+      process.stdin.on("error", () => cleanup());
+      process.stdin.resume();
+    }
   } catch (e) {
     console.error("终端启动失败:", e.message);
     process.exit(1);

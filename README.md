@@ -22,6 +22,7 @@
 ./cli.sh
 
 # 网关宿主机完整终端(bash TTY,方向键/Tab/颜色正常)
+# 注意:已在 Control UI 的网关终端里时会被阻止(防嵌套残留)
 ./cli.sh --gateway
 
 # 单条转发命令到已选节点
