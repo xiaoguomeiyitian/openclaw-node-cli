@@ -195,6 +195,18 @@ async function runRawMode() {
   let lineBuf = "";   // 当前行已输入内容
   let cursor = 0;     // 光标位置(相对 lineBuf)
 
+  // ---- 历史命令 ----
+  const history = [];          // 已提交的命令(去重,不含 exit/quit/空)
+  let histIdx = -1;            // -1=当前行;0..len-1=浏览历史
+  let histDraft = "";          // 上翻前暂存的未提交输入
+
+  const pushHistory = (line) => {
+    const t = line.trim();
+    if (!t) return;
+    if (history[history.length - 1] === t) return; // 连续相同去重
+    history.push(t);
+  };
+
   const redraw = () => {
     // 清行 + 重绘
     process.stdout.write(`\r${promptNow().replace(/^\n/, "")}` + lineBuf + " \b");
@@ -205,14 +217,51 @@ async function runRawMode() {
 
   process.stdout.write(promptNow());
 
+  // ---- 方向键/编辑键:替换当前行内容并重绘 ----
+  const setLine = (text) => {
+    lineBuf = text;
+    cursor = text.length;
+    redraw();
+  };
+
+  const handleKey = (key) => {
+    if (key === "up") {
+      if (history.length === 0) return;
+      if (histIdx === -1) { histDraft = lineBuf; histIdx = history.length - 1; }
+      else if (histIdx > 0) histIdx--;
+      setLine(history[histIdx]);
+    } else if (key === "down") {
+      if (histIdx === -1) return;
+      if (histIdx >= history.length - 1) {
+        histIdx = -1;
+        setLine(histDraft);
+      } else {
+        histIdx++;
+        setLine(history[histIdx]);
+      }
+    } else if (key === "left") {
+      if (cursor > 0) { cursor--; redraw(); }
+    } else if (key === "right") {
+      if (cursor < lineBuf.length) { cursor++; redraw(); }
+    } else if (key === "home") {
+      cursor = 0; redraw();
+    } else if (key === "end") {
+      cursor = lineBuf.length; redraw();
+    } else if (key === "delete") {
+      if (cursor < lineBuf.length) { lineBuf = lineBuf.slice(0, cursor) + lineBuf.slice(cursor + 1); redraw(); }
+    }
+  };
+
   const handleChar = async (ch) => {
     if (ch === "\r" || ch === "\n") {
       // 提交
       process.stdout.write("\n");
       const line = lineBuf;
       lineBuf = ""; cursor = 0;
+      histIdx = -1; histDraft = "";
       if (line.trim() === "exit" || line.trim() === "quit") { shutdown(); return; }
       if (line.trim()) {
+        pushHistory(line);
         await execLine(line);
         process.stdout.write(promptNow());
       } else {
@@ -222,6 +271,7 @@ async function runRawMode() {
     } else if (ch === "\x03") { // Ctrl-C
       process.stdout.write("^C\n");
       lineBuf = ""; cursor = 0;
+      histIdx = -1; histDraft = "";
       process.stdout.write(promptNow());
       return;
     } else if (ch === "\x04") { // Ctrl-D 空行退出
@@ -237,8 +287,14 @@ async function runRawMode() {
       if (cursor > 0) { lineBuf = lineBuf.slice(0, cursor - 1) + lineBuf.slice(cursor); cursor--; }
       redraw();
       return;
-    } else if (ch === "\x1b") { // ESC 序列(方向键)
-      // 简单忽略(不处理方向键移动光标)
+    } else if (ch === "\x01") { // Ctrl-A 行首
+      cursor = 0; redraw(); return;
+    } else if (ch === "\x05") { // Ctrl-E 行尾
+      cursor = lineBuf.length; redraw(); return;
+    } else if (ch === "\x0c") { // Ctrl-L 清屏
+      process.stdout.write("\x1b[2J\x1b[H");
+      process.stdout.write(promptNow());
+      redraw();
       return;
     } else if (ch >= " " && ch !== "\x7f") { // 可打印字符
       lineBuf = lineBuf.slice(0, cursor) + ch + lineBuf.slice(cursor);
@@ -247,7 +303,45 @@ async function runRawMode() {
     }
   };
 
-  const dispatch = (chunk) => { for (const ch of chunk) handleChar(ch); };
+  // ---- ESC 序列解析(方向键/Home/End/Delete 等) ----
+  // 方向键是 ANSI 转义序列(如上键 \x1b[A),可能跨多个 data chunk 到达,
+  // 因此用 escBuf 累积 + 超时兜底,而不是逐字符直接分发。
+  let escBuf = "";
+  let escTimer = null;
+  const ESC_SEQS = {
+    "\x1b[A": "up", "\x1b[B": "down",
+    "\x1b[C": "right", "\x1b[D": "left",
+    "\x1b[H": "home", "\x1b[F": "end",
+    "\x1b[1~": "home", "\x1b[4~": "end", "\x1b[3~": "delete"
+  };
+  const resolveEscape = (buf) => {
+    // 完整匹配返回键名;若是某个已知序列的前缀返回 null(等更多字节);否则返回 undefined(丢弃)
+    let isPrefix = false;
+    for (const seq of Object.keys(ESC_SEQS)) {
+      if (seq === buf) return ESC_SEQS[seq];
+      if (seq.startsWith(buf)) isPrefix = true;
+    }
+    return isPrefix ? null : undefined;
+  };
+
+  const dispatch = (chunk) => {
+    for (const ch of chunk) {
+      if (escBuf) {
+        escBuf += ch;
+        const key = resolveEscape(escBuf);
+        if (key) { clearTimeout(escTimer); escBuf = ""; handleKey(key); }
+        else if (key === undefined) { clearTimeout(escTimer); escBuf = ""; }
+        continue;
+      }
+      if (ch === "\x1b") {
+        escBuf = "\x1b";
+        clearTimeout(escTimer);
+        escTimer = setTimeout(() => { escBuf = ""; }, 80); // 孤立 ESC 超时丢弃
+        continue;
+      }
+      handleChar(ch);
+    }
+  };
 
   async function doTabComplete() {
     try {
