@@ -229,3 +229,37 @@ ESTABLISHED,内层还挂着嵌套 bash -l)。
 排查手段(容器里没有 ss/fuser/strace 时):`/proc/<pid>/fd` readlink 找 socket →
 `/proc/<pid>/net/tcp` 按 inode 匹配(0100007F:4E20 = 127.0.0.1:20000,状态 01
 = ESTABLISHED);`wchan` 看是否自旋(ep_poll=正常 epoll 等待)。
+
+## WS 连接复用 + 断线重连(2026-09-09)
+
+新增 `gw-client.mjs`:`GwClient` 进程级单例,一条 WS 连接服务本进程内全部
+`node.invoke`(连接对象是网关,不是节点,所以 nodeId 无关)。
+
+- **收益**:旧实现每次命令都「新建 WS + connect 握手 + node.invoke + close」,Tab 补全
+  一条要开三次连接(isDirectory / completeToken / execLine)。复用后 3 次命令仅 1 次
+  connect(实测)。
+- **断线重连**:`onclose` 时清除 `connected` 标记 + fail 所有 pending;下次
+  `ensureConnected` 自动重建;`request()` 里若中途断开会重连后重试一次(幂等靠上层
+  idempotencyKey)。
+- **关键坑(退出残留)**:连接池 WS 保持打开会让事件循环有活跃句柄,node-shell 主循环
+  `await` 结束后进程不自然退出。解法:退出路径显式 `getClient().close()`:
+  - `runRawMode` 的 `shutdown()`(exit/Ctrl-D)里 close;
+  - `runLineMode` 结束后在主流程 `closeClient()`(close + process.exit(0))。
+  - node-exec 因为本来 `process.exit()` 强制退出,不受影响。
+- **并发 connect 去重**:`_connectPromise` 共享同一次连接进行中的 Promise,避免多个
+  并发调用各自建连。
+
+## 脚本推送执行(node-script,2026-09-09)
+
+新增 `node-script`:把本地脚本 base64 编码后推送到节点落地执行,规避「引号地狱」
+(构建脚本里塞满引号/转义时,node-exec 靠拼接 argv 极易出错)。
+
+- 用法:`./node-script <本地脚本> [args...]`、`--stdin` 读标准输入、`-i <解释器>`
+  (默认 bash)、`-n <nodeId>` 指定节点。
+- 落地:base64 分块(每块 60KB)写入 `/tmp/.node-term-script-*.b64` → `base64 -d` 解码
+  成脚本 → `chmod +x` → 执行 → `rm -f` 清理。分块规避单条 argv 过长限制。
+- 参数传递:脚本参数经 `shellArg`(单引号转义)逐一带入,含空格/单双引号都字面安全。
+- 已实测:文件模式、--stdin、python3 解释器、含引号参数、678KB 大脚本分块、清理
+  无残留,均正常。
+- 坑:解析参数要「先扫 flags 再扫位置参数」,--stdin 模式下第一个位置参数是 scriptArgs
+  而不是脚本路径(否则参数会被误当成 scriptPath)。

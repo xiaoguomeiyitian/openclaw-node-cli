@@ -8,7 +8,9 @@
 - `node-shell.mjs`     节点 shell(逐条经 system.run 执行,cd 持久化,exit 退出)
 - `gateway-term.mjs`   网关 PTY 客户端(连接 Gateway terminal.* RPC)
 - `gw-sysrun.mjs`      节点命令底层(经 node.invoke system.run)
+- `gw-client.mjs`      网关 WS 连接复用池(单例,断线自动重连)
 - `node-exec`          单条转发命令到已选节点
+- `node-script`        脚本推送执行(上传本地脚本到节点执行,规避引号地狱)
 - `gw-pass`            (可选)网关密码,权限 600;不提交版本库
 
 ## 前置
@@ -30,6 +32,15 @@
 ./node-exec 'svn info'
 ./node-exec 'docker ps'
 ./node-exec 'echo hello && hostname'
+
+# 脚本推送执行:把本地脚本上传到节点执行(规避引号地狱)
+./node-script ./build.sh
+./node-script ./deploy.sh --env=prod 'arg with space'
+./node-script --stdin <<'EOF'   # 内联脚本
+#!/bin/bash
+echo "hello from inline script"
+EOF
+./node-script --stdin -i python3 'import sys; print(sys.argv)' p1 p2
 ```
 
 ## 说明

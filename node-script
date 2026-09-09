@@ -1,0 +1,111 @@
+#!/usr/bin/env node
+// node-script — 脚本推送执行:把本地脚本上传到节点执行,规避引号地狱
+// 用法:
+//   node-script <本地脚本路径> [参数...]     读取本地脚本,推送到节点执行
+//   node-script --stdin [参数...]            从标准输入读脚本内容,推送执行
+//   node-script --interpreter sh <脚本> ...  指定解释器(默认 bash)
+//   node-script --node <nodeId> <脚本> ...   指定节点(默认读 profile)
+// 原理:base64 编码脚本 → node.invoke(system.run) 在节点 base64 -d 落地临时文件 → 执行 → 清理。
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, join, basename } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const DIR = dirname(fileURLToPath(import.meta.url));
+const PROFILE = join(DIR, ".node-term-profile.json");
+
+// 先扫 flags,再扫位置参数(stdin 模式下第一个位置参数也是 scriptArgs,不是脚本路径)
+const argv = process.argv.slice(2);
+let nodeId = null;
+let useStdin = false;
+let interpreter = "bash";
+let scriptPath = null;
+let scriptArgs = [];
+
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === "--stdin") { useStdin = true; argv[i] = null; }
+  else if (a === "--node" || a === "-n") { nodeId = argv[i + 1]; argv[i] = argv[i + 1] = null; i++; }
+  else if (a === "--interpreter" || a === "-i") { interpreter = argv[i + 1] || "bash"; argv[i] = argv[i + 1] = null; i++; }
+  else if (a === "--help" || a === "-h") { printHelp(); process.exit(0); }
+}
+const positional = argv.filter((a) => a !== null);
+if (!useStdin && positional.length) { scriptPath = positional.shift(); }
+scriptArgs = positional;
+
+function printHelp() {
+  console.log(`node-script — 脚本推送执行(上传本地脚本到节点执行,规避引号地狱)
+
+用法:
+  node-script <本地脚本> [参数...]
+  node-script --stdin [参数...]               从标准输入读脚本
+  node-script -i sh <脚本> ...                指定解释器(默认 bash)
+  node-script -n <nodeId> <脚本> ...          指定节点(默认读 profile)
+  node-script --stdin -i python3 <<'EOF' ...  直接内联脚本(示例)
+
+原理:base64 编码脚本 → 节点 base64 -d 落地临时文件 → 执行 → 清理。`);
+}
+
+// ---- 取脚本内容 ----
+let scriptContent = null;
+if (useStdin) {
+  scriptContent = readFileSync(0, "utf8");
+} else if (scriptPath) {
+  if (!existsSync(scriptPath)) {
+    console.error(`脚本不存在: ${scriptPath}`);
+    process.exit(1);
+  }
+  scriptContent = readFileSync(scriptPath, "utf8");
+} else {
+  printHelp();
+  process.exit(2);
+}
+
+// ---- 取 nodeId ----
+if (!nodeId) {
+  try {
+    const p = JSON.parse(readFileSync(PROFILE, "utf8"));
+    nodeId = p.nodeId;
+  } catch {
+    console.error("未指定节点(用 -n <nodeId>),且未找到 profile(先 ./cli.sh 选节点)");
+    process.exit(1);
+  }
+}
+
+// ---- 落地并执行 ----
+const { runOnNode } = await import("./gw-sysrun.mjs");
+
+const b64 = Buffer.from(scriptContent, "utf8").toString("base64");
+const tmpScript = `/tmp/.node-term-script-${(globalThis.crypto ? crypto.randomUUID() : Date.now()).slice(0, 8)}`;
+const tmpB64 = tmpScript + ".b64";
+
+// 分块落地(规避单条命令 argv 过长:每块 60KB base64,约 45KB 原文)
+const CHUNK = 60000;
+const chunks = [];
+for (let i = 0; i < b64.length; i += CHUNK) chunks.push(b64.slice(i, i + CHUNK));
+
+// 1) 逐块写入 base64 文件
+for (let i = 0; i < chunks.length; i++) {
+  const op = i === 0 ? ">" : ">>";
+  await runOnNode({
+    nodeId,
+    command: `printf %s ${JSON.stringify(chunks[i])} ${op} ${JSON.stringify(tmpB64)}`,
+    timeoutMs: 60000
+  });
+}
+
+// 2) base64 解码成脚本(转义单引号保护)
+const shellArg = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+const argList = scriptArgs.map(shellArg).join(" ");
+const decodeAndRun = `base64 -d ${shellArg(tmpB64)} > ${shellArg(tmpScript)} && chmod +x ${shellArg(tmpScript)} && ${shellArg(interpreter)} ${shellArg(tmpScript)} ${argList}; rc=$?; rm -f ${shellArg(tmpScript)} ${shellArg(tmpB64)}; exit $rc`;
+
+try {
+  const res = await runOnNode({ nodeId, command: decodeAndRun, timeoutMs: 900000 });
+  if (res.stdout) process.stdout.write(res.stdout);
+  if (res.stderr) process.stderr.write(res.stderr);
+  process.exit(res.exitCode ?? (res.ok ? 0 : 1));
+} catch (e) {
+  console.error("脚本执行失败:", e.message);
+  // 尝试清理残留
+  try { await runOnNode({ nodeId, command: `rm -f ${shellArg(tmpScript)} ${shellArg(tmpB64)}` }); } catch {}
+  process.exit(1);
+}
