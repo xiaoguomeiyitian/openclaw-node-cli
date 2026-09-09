@@ -26,9 +26,9 @@ if (cmd.length === 0) {
 // 走 agent 的一次性 exec 语义:执行远端命令并回传 stdout/stderr/exitCode。
 // 实现:通过 node 内置直连 Gateway WS 发 node.invoke(system.run),与 gateway-term 同源。
 // 注意:system.run 需节点 approval 为 full(默认已配),由 exec 通道的审批语义覆盖。
-const { nodeId } = node;
+const { nodeId, platform } = node;
 import("./gw-sysrun.mjs").then(async (m) => {
-  const res = await m.runOnNode({ nodeId, command: cmd.join(" ") });
+  const res = await m.runOnNode({ nodeId, command: cmd.join(" "), platform });
   if (res.stdout) process.stdout.write(res.stdout);
   if (res.stderr) process.stderr.write(res.stderr);
   process.exit(res.exitCode ?? (res.ok ? 0 : 1));

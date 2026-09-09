@@ -16,7 +16,7 @@ export function readGatewayPassword() {
     || "";
 }
 
-export function runOnNode({ nodeId, command, cwd = "", timeoutMs = 900000 }) {
+export function runOnNode({ nodeId, command, cwd = "", timeoutMs = 900000, platform = "linux" }) {
   const url = process.env.GW_WS_URL || "ws://127.0.0.1:20000";
   const password = readGatewayPassword();
   if (!password) return Promise.reject(new Error("缺网关密码(设 GW_PASSWORD 或放 gw-pass)"));
@@ -67,8 +67,12 @@ export function runOnNode({ nodeId, command, cwd = "", timeoutMs = 900000 }) {
           role: "operator", scopes: ["operator.admin"],
           auth: { password }, caps: [], commands: []
         });
-        // system.run 走底层 node.invoke;command 需为 argv 数组,复合命令用 bash -c
-        const argv = ["bash", "-lc", command];
+        // system.run 走底层 node.invoke;command 需为 argv 数组,复合命令用 shell 包装:
+        // linux/mac: bash -lc(登录 shell,环境变量齐全);windows: cmd /d /c(禁用 AutoRun,
+        // 复合命令 && || 等由 cmd 解释)
+        const argv = (platform || "").toLowerCase() === "windows"
+          ? ["cmd", "/d", "/c", command]
+          : ["bash", "-lc", command];
         const invokeParams = {
           command: argv,
           ...(cwd ? { cwd } : {}),
@@ -91,13 +95,17 @@ export function runOnNode({ nodeId, command, cwd = "", timeoutMs = 900000 }) {
   });
 }
 
-// 直接运行时:argv[2]=nodeId argv[3]=command
+// 直接运行时:argv[2]=nodeId argv[3]=command [argv[4]=platform]
 // 注意用 pathToFileURL 比较:直接写 file://+path 会在相对路径调用(node ./gw-sysrun.mjs)时
 // 不相等(缺绝对路径解析),导致直连模式静默失效。
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [, , nodeId, ...rest] = process.argv;
-  if (!nodeId || rest.length === 0) { console.error("用法: gw-sysrun.mjs <nodeId> <command...>"); process.exit(2); }
-  runOnNode({ nodeId, command: rest.join(" ") })
+  const [, , nodeId, maybePlatform, ...rest] = process.argv;
+  // 兼容旧形态:node gw-sysrun.mjs <nodeId> <command...>(platform 缺省 linux)
+  let platform = "linux";
+  if (rest.length > 0 && (maybePlatform === "linux" || maybePlatform === "windows")) platform = maybePlatform;
+  else rest.unshift(maybePlatform);
+  if (!nodeId || rest.length === 0) { console.error("用法: gw-sysrun.mjs <nodeId> <command...> [platform]"); process.exit(2); }
+  runOnNode({ nodeId, command: rest.join(" "), platform })
     .then((r) => { if (r.stdout) process.stdout.write(r.stdout); if (r.stderr) process.stderr.write(r.stderr); process.exit(r.exitCode ?? 0); })
     .catch((e) => { console.error(e.message); process.exit(1); });
 }

@@ -81,7 +81,7 @@ const isWindows = (node.platform || "").toLowerCase() === "windows";
 
 console.log(`节点 shell:${node.displayName || nodeId} (${node.platform || "?"})`);
 if (isWindows) {
-  console.log("注意:Windows 节点无 cwd 持久化,每条命令独立执行。\n");
+  console.log("注意:Windows 节点经 cmd /d /c 执行,无 cwd 持久化/Tab 补全;exit 退出。\n");
 } else {
   console.log("说明:逐条执行,cd 记住;Tab 补全目录/文件;vim/htop 等全屏程序不可用;exit 退出。\n");
 }
@@ -140,7 +140,7 @@ async function completeToken(token) {
   // 'fo'* 视为引号内字面 fo 接通配展开,行为与裸写 fo* 等价。
   const dirQuoted = dirPart === "/" ? "/" : `${shq(dirPart)}/`;
   const cmd = `ls -d1 ${dirQuoted}${shq(base)}* 2>/dev/null || true`;
-  const res = await runOnNode({ nodeId, command: cmd, timeoutMs: 10000 });
+  const res = await runOnNode({ nodeId, command: cmd, timeoutMs: 10000, platform: node.platform });
   const entries = (res.stdout || "").split("\n").map((s) => s.trim()).filter(Boolean);
   if (!entries.length) return null;
   const names = entries.map((e) => (e.includes("/") ? e.slice(e.lastIndexOf("/") + 1) : e));
@@ -179,7 +179,7 @@ async function runLineMode() {
 
 async function execLine(line) {
   try {
-    const res = await runOnNode({ nodeId, command: buildCommand(line), timeoutMs: 600000 });
+    const res = await runOnNode({ nodeId, command: buildCommand(line), timeoutMs: 600000, platform: node.platform });
     if (!isWindows) {
       const p = parseOut(res.stdout);
       if (p.cwd && p.cwd !== cwd) {
@@ -192,6 +192,7 @@ async function execLine(line) {
     } else {
       if (res.stdout) process.stdout.write(res.stdout);
       if (res.stderr) process.stderr.write(res.stderr);
+      if (res.exitCode !== 0) process.stdout.write(`[退出码 ${res.exitCode}]\n`);
     }
   } catch (e) {
     console.error(`[执行失败] ${e.message}`);
@@ -405,7 +406,7 @@ async function runRawMode() {
   function isDirectory(name) {
     // name 可能是补全出的相对名字;判断时同样区分绝对/相对路径
     const p = name.startsWith("/") || name.startsWith("~") ? name : (cwd ? cwd + "/" + name : name);
-    return runOnNode({ nodeId, command: `[ -d ${shq(p)} ] && echo yes || echo no`, timeoutMs: 5000 })
+    return runOnNode({ nodeId, command: `[ -d ${shq(p)} ] && echo yes || echo no`, timeoutMs: 5000, platform: node.platform })
       .then((r) => (r.stdout || "").trim() === "yes");
   }
 

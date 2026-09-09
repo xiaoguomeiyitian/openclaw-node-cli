@@ -152,3 +152,16 @@ Tab 补全的 glob 特例:引号包 base 主体、`*` 留引号外(`'fo'*`)。ba
   一律 `redraw()`(含 `\x1b[K` 清行尾)。
 - SS3 变体:`\x1bOA`~`\x1bOD`(application cursor mode)与 `\x1b[A`~`\x1b[D` 同
   等处理,否则部分终端方向键失灵。
+
+## Windows 节点支持(2026-09-09 实测通过)
+
+`runOnNode` 接受 `platform` 参数,Windows 节点命令包装为 `cmd /d /c <command>`
+(`/d` 禁用注册表 AutoRun,防意外的恶意预执行):
+
+- 调用方必须传 `node.platform`(node-shell 三处 / node-exec 一处均已传);
+- 直连形态 `node gw-sysrun.mjs <nodeId> <command...> [linux|windows]` 兼容旧无 platform 形态;
+- Windows 下无 cwd 持久化、无 Tab 补全、无 `__RC` 信标(直接透传 exitCode);
+- 已在真实 Windows 节点实测:`echo %USERNAME% && ver && cd`、`dir /b | findstr`、
+  错误命令(stderr + exitCode=1)均正常。
+- 注意:cmd 的 `&&` 与 bash 语义一致,但 `||`/变量语法不同;写命令时按 cmd 习惯。
+- profile 切换测试后记得切回常用节点(测试中已切回 byServer)。
