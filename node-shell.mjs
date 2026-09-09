@@ -81,7 +81,7 @@ const isWindows = (node.platform || "").toLowerCase() === "windows";
 
 console.log(`节点 shell:${node.displayName || nodeId} (${node.platform || "?"})`);
 if (isWindows) {
-  console.log("注意:Windows 节点经 cmd /d /c 执行,无 cwd 持久化/Tab 补全;exit 退出。\n");
+  console.log("说明:PowerShell 执行,cd 记住;Tab 补全目录/文件;↑↓ 历史;exit 退出。\n");
 } else {
   console.log("说明:逐条执行,cd 记住;Tab 补全目录/文件;vim/htop 等全屏程序不可用;exit 退出。\n");
 }
@@ -94,8 +94,23 @@ function promptNow() { return `\n${node.displayName || "node"}${cwd ? ":" + cwd 
 // ⚠ 不能用 JSON.stringify(双引号):bash 双引号里 $(...) 和 `...` 会被执行,存在命令注入!
 const shq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 
+// PowerShell 单引号转义:PS 单引号字符串里单引号用 '' 双写转义;
+// 单引号内 $ / ` / ( ) 均字面,安全。用于 Set-LiteralPath / Get-ChildItem 路径。
+const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
+
 function buildCommand(line) {
-  if (isWindows) return line;
+  if (isWindows) {
+    // Windows(PowerShell):客户端自画像 cwd,用 Set-Location 前置注入;末尾回传位置 + 退出码。
+    // $LASTEXITCODE 只在外部命令后有意义;PS 内部 cmdlet 失败用 $? 判断,两者合并成 rc。
+    const t = line.trim();
+    const isCd = /^cd(\s|$)/i.test(t) || /^(set-location|sl|chdir)(\s|$)/i.test(t);
+    const prefix = cwd ? `Set-Location -LiteralPath ${psq(cwd)} -ErrorAction SilentlyContinue; ` : "";
+    const body = line;
+    return `${prefix}${body}\n` +
+      `$__rc = if ($?) { if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 } } else { 1 };\n` +
+      `Write-Output ("__NT_PWD=" + (Get-Location).Path);\n` +
+      `Write-Output ("__NT_RC=" + $__rc)`;
+  }
   const prefix = cwd
     ? `cd ${shq(cwd)} 2>/dev/null || { printf '[目录不存在,已回退到家目录]\n' >&2; cd "$HOME" || true; }; `
     : "";
@@ -104,6 +119,23 @@ function buildCommand(line) {
 
 function parseOut(raw) {
   const text = raw ?? "";
+  if (isWindows) {
+    // Windows 信标:末尾两行 __NT_PWD / __NT_RC
+    const lines = text.replace(/\n$/, "").split("\n");
+    let cwd = null, rc = null;
+    const body = [];
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      const pm = l.match(/^__NT_PWD=(.+)$/);
+      const rm = l.match(/^__NT_RC=(-?\d+)$/);
+      if (pm) cwd = pm[1];
+      else if (rm) rc = Number(rm[1]);
+      else body.push(l);
+    }
+    // PowerShell Write-Output 后面可能有额外空行,去掉末尾多余空行
+    while (body.length && body[body.length - 1] === "") body.pop();
+    return { rc, cwd, display: body.length ? body.join("\n") + "\n" : "" };
+  }
   const lines = text.replace(/\n$/, "").split("\n");
   if (lines.length >= 2) {
     const pwdLine = lines[lines.length - 1];
@@ -120,9 +152,49 @@ function parseOut(raw) {
   return { rc: null, cwd: null, display: text };
 }
 
+// Windows 路径解析:绝对(盘符或 \ 开头)直接返回;相对拼 cwd。
+function resolveWinPath(token) {
+  if (/^[a-zA-Z]:[\\/]/.test(token)) return token;                    // 盘符绝对路径
+  if (token.startsWith("\\")) return token;                           // UNC / 根
+  if (cwd) return cwd + "\\" + token;
+  return token;
+}
+
 // ---- Tab 补全:发去节点跑 ls -d,取候选 ----
 async function completeToken(token) {
-  if (isWindows) return null;
+  if (isWindows) {
+    // Windows:PowerShell Get-ChildItem 枚举子项做前缀匹配。
+    // 路径分隔符为 \,处理绝对/相对/盘符。
+    const full = resolveWinPath(token);
+    let dirPart, base;
+    const slash = full.lastIndexOf("\\");
+    if (slash >= 0) {
+      dirPart = full.slice(0, slash);
+      base = full.slice(slash + 1);
+      if (!dirPart) dirPart = "\\"; // 根
+    } else {
+      dirPart = cwd || ".";
+      base = token;
+    }
+    // 用 -LiteralPath 精确指向目录,-Filter 只对文件名字面;Get-ChildItem 需加 -Force 才能列隐藏项
+    const cmd = `Get-ChildItem -LiteralPath ${psq(dirPart)} -Force -ErrorAction SilentlyContinue | ` +
+      `Where-Object { $_.Name -like ${psq(base + "*")} } | ` +
+      `ForEach-Object { ($(if ($_.PSIsContainer) {"[d]"} else {"[f]"})) + $_.Name }`;
+    const res = await runOnNode({ nodeId, command: cmd, timeoutMs: 10000, platform: node.platform });
+    const entries = (res.stdout || "").split("\n").map((s) => s.trim()).filter(Boolean);
+    if (!entries.length) return null;
+    const names = entries.map((e) => {
+      const isDir = e.startsWith("[d]");
+      return { name: e.slice(3), isDir };
+    });
+    let common = names[0].name;
+    for (const n of names) {
+      let i = 0;
+      while (i < common.length && i < n.name.length && common[i] === n.name[i]) i++;
+      common = common.slice(0, i);
+    }
+    return { names: names.map((n) => n.name), dirs: names.map((n) => n.isDir), common, base };
+  }
   // 绝对路径不拼 cwd;~ 开头交给 bash 展开,不拼;其余相对路径才拼 cwd
   const isTilde = token.startsWith("~");
   const full = token.startsWith("/") || isTilde ? token : (cwd ? `${cwd}/${token}` : token);
@@ -157,7 +229,7 @@ async function completeToken(token) {
 // TTY:逐键读取(Tab 补全);非 TTY:按行读取
 const isTTY = !!process.stdin.isTTY;
 
-if (isTTY && !isWindows) {
+if (isTTY) {
   await runRawMode();
 } else {
   await runLineMode();
@@ -180,20 +252,14 @@ async function runLineMode() {
 async function execLine(line) {
   try {
     const res = await runOnNode({ nodeId, command: buildCommand(line), timeoutMs: 600000, platform: node.platform });
-    if (!isWindows) {
-      const p = parseOut(res.stdout);
-      if (p.cwd && p.cwd !== cwd) {
-        if (cwd && line.trim().startsWith("cd")) process.stdout.write(`(已切换到 ${p.cwd})\n`);
-        cwd = p.cwd;
-      }
-      if (p.display) process.stdout.write(p.display);
-      if (res.stderr) process.stderr.write(res.stderr);
-      if (p.rc !== null && p.rc !== 0) process.stdout.write(`[退出码 ${p.rc}]\n`);
-    } else {
-      if (res.stdout) process.stdout.write(res.stdout);
-      if (res.stderr) process.stderr.write(res.stderr);
-      if (res.exitCode !== 0) process.stdout.write(`[退出码 ${res.exitCode}]\n`);
+    const p = parseOut(res.stdout);
+    if (p.cwd && p.cwd !== cwd) {
+      if (cwd && /^(cd|chdir|set-location|sl)(\s|$)/i.test(line.trim())) process.stdout.write(`(已切换到 ${p.cwd})\n`);
+      cwd = p.cwd;
     }
+    if (p.display) process.stdout.write(p.display);
+    if (res.stderr) process.stderr.write(res.stderr);
+    if (p.rc !== null && p.rc !== 0) process.stdout.write(`[退出码 ${p.rc}]\n`);
   } catch (e) {
     console.error(`[执行失败] ${e.message}`);
   }
@@ -379,13 +445,16 @@ async function runRawMode() {
     if (!token) return;
     const result = await completeToken(token);
     if (!result) return;
+    const sep = isWindows ? "\\" : "/";
     if (result.names.length === 1) {
       // 唯一候选:直接补全
       const completion = result.names[0];
       const ins = completion.slice(result.base.length);
-      // 判断目录则加 /
-      const isDir = await isDirectory(completion);
-      const suffix = isDir ? "/" : "";
+      // 判断目录则加分隔符;Windows 用枚举结果里的 dirs 标记,Linux 走 isDirectory
+      let isDir;
+      if (isWindows) isDir = result.dirs[0];
+      else isDir = await isDirectory(completion);
+      const suffix = isDir ? sep : "";
       const fullIns = ins + suffix;
       lineBuf = lineBuf.slice(0, cursor) + fullIns + lineBuf.slice(cursor);
       cursor += fullIns.length;

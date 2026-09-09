@@ -35,8 +35,8 @@
 ## 说明
 - **节点 shell** 逐条经 `node.invoke(system.run)` 执行,`cd` 会持久化;`vim`/`htop`
   等全屏程序不可用,`svn`/`npm`/`docker`/`ls` 等构建运维命令均可用,`exit` 退出。
-  Windows 节点自动用 PowerShell(`-NoProfile -NonInteractive`)执行;PS5.1 不支持
-  `&&`,多条命令用 `;` 分隔;无 cwd 持久化/Tab 补全。
+  Windows 节点自动用 PowerShell(`-NoProfile -NonInteractive`)执行;cd 持久化、Tab
+  补全、方向键历史均已支持;PS5.1 不支持 `&&`,多条命令用 `;` 分隔。
 - **Tab 补全**(仅 TTY 下,即真实终端里):按 Tab 补全目录/文件路径。唯一候选直接补
   全(目录自动加 `/`);多候选列出来并补到公共前缀。管道/非 TTY 下无补全(退回按行)。
 - **历史与行编辑**(仅 TTY 下):支持终端常用快捷键 ——
