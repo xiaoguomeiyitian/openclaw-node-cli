@@ -173,27 +173,35 @@ Tab 补全的 glob 特例:引号包 base 主体、`*` 留引号外(`'fo'*`)。ba
   `Get-ChildItem -Force`)。
 - profile 切换测试后记得切回常用节点(测试中已切回 byServer)。
 
-### Windows 特有:cd 持久化 / Tab 补全 / 方向键(2026-09-09 补齐,实测通过)
+### Windows 节点当前状态:暂不支持(2026-09-09)
 
-之前 Windows 节点无 cwd 持久化、无 Tab、无方向键(逐字符读取被 `!isWindows` 短路)。
-现已补齐:
+Windows 节点的 cd 持久化实测仍不可靠(PowerShell 每次 `-Command` 都是新进程,`cd`
+不持久;信号回传方案在真实环境有问题),按需求**暂不支持**,后续再重新启用。
+
+当前行为:
+- `node-term.mjs` / `node-shell.mjs` 选择 Windows 节点时提示「暂不支持 Windows 节点」
+  并退回选择环节,循环重选直到选到 linux 节点;
+- `node-shell.mjs` 启动时兜底拒绝(含 `--reuse` 读到残留 windows profile 的场景);
+- `node-exec` 单条转发仍可显式对 Windows 执行(PowerShell 包装),但不涉及 cd/Tab/历史。
+- 底层 `gw-sysrun.mjs` 的 Windows PowerShell 包装(`powershell -NoProfile -NonInteractive`)
+  保留,node-exec 直连时可用;node-shell 交互态不再进 Windows。
+
+以下为早期探索记录(已作废/回滚,仅供将来重启 Windows 支持时参考):
+
+### [已回滚] Windows cd 持久化 / Tab 补全方案(探索记录)
+
+之前尝试补齐 Windows 的 cd 持久化/Tab/方向键,思路如下,但因真实环境不可靠已回滚:
 
 - **cwd 持久化 = 客户端侧自画像**:PowerShell 每次 `-Command` 都是新进程,`cd` 不能
   靠远端持久。node-shell 用 `cwd` 变量(纯客户端状态),执行时注入
   `Set-Location -LiteralPath 'D:\...' -ErrorAction SilentlyContinue;` 前缀,命令末尾
   用 `Write-Output ("__NT_PWD=" + (Get-Location).Path)` 回传新位置,客户端据此更新。
 - **信标**:Windows 用 `__NT_PWD` / `__NT_RC`(区别于 bash 的 `__RC`/`pwd`)。
-  `__NT_RC` 计算:`if ($?) { $LASTEXITCODE ?? 0 } else { 1 }` —— PS 的 `$?`(上一条
-  命令成否)与 `$LASTEXITCODE`(外部程序退出码)语义不同,须合并。
+  `__NT_RC` 计算:`if ($?) { $LASTEXITCODE ?? 0 } else { 1 }`。
 - **Tab 补全**:`Get-ChildItem -LiteralPath '<dir>' -Force | Where-Object { $_.Name
-  -like '<base>*' } | ForEach-Object { ('[d]'/'[f]') + $_.Name }`,PSIsContainer 判断
-  目录加 `\`。`-LiteralPath` 不解析通配/特殊字符,`-like` 的 `*` 才是通配。
-- **路径分隔**:Windows 用 `\`;`resolveWinPath` 识别盘符(`D:\...`)/UNC(`\\...`)绝对
-  路径,其余相对拼 cwd。PowerShell 单引号转义用 `psq`(内部 `'` → `''` 双写)。
-- **方向键历史:`raw mode` 现已对 Windows 也启用**(原 `if (isTTY && !isWindows)` 改为
-  `if (isTTY)`),↑↓/←→/Home/End/Tab 全部可用;仅 Windows 非 TTY 管道才退 runLineMode。
-- 已知:Windows 下 `isDirectory` 不再单独往返查询,补全结果里的 `dirs[]` 直接复用
-  枚举出的 PSIsContainer 标记(省一次 RPC)。
+  -like '<base>*' } | ForEach-Object { ('[d]'/'[f]') + $_.Name }`。
+- **路径分隔**:Windows 用 `\`;`resolveWinPath` 识别盘符/UNC;`psq` 单引号转义。
+- **方向键历史**:raw mode 对 Windows 也启用(`if (isTTY)`);仅非 TTY 管道退货 runLineMode。
 
 ## 残留进程事故复盘(2026-09-09)
 

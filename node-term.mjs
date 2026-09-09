@@ -72,37 +72,59 @@ const ask = (prompt) => new Promise((r) => {
   lineWaiters.push(r);
 });
 
-const sel = (await ask(`选择序号 [1-${nodes.length}]: `)) ?? "";
+let sel = (await ask(`选择序号 [1-${nodes.length}]: `)) ?? "";
 if (!/^\d+$/.test(sel) || Number(sel) < 1 || Number(sel) > nodes.length) {
   console.error("无效序号");
   process.exit(2);
 }
-const node = nodes[Number(sel) - 1];
-writeFileSync(PROFILE, JSON.stringify(node, null, 2));
-console.log(`→ 节点已选: ${node.displayName || node.nodeId}`);
-if (useGateway) {
-  console.log("  正在进入网关宿主机完整终端(交互式 bash;full TTY)...");
-} else {
-  console.log("  正在进入节点 shell(逐条执行,cd 持久化;exit 退出)");
-  console.log("  如需网关本机完整终端,运行: ./cli.sh --gateway");
+
+// 进入 shell 的统一封装(把已选节点传给子进程,stdin 交接)
+function enterShell(node) {
+  if (useGateway) {
+    console.log("  正在进入网关宿主机完整终端(交互式 bash;full TTY)...");
+  } else {
+    console.log("  正在进入节点 shell(逐条执行,cd 持久化;exit 退出)");
+    console.log("  如需网关本机完整终端,运行: ./cli.sh --gateway");
+  }
+
+  // 把剩余 stdin 传给子进程;并把已选节点通过 env 直接传下去(不靠 profile 中转)
+  process.stdin.pause();
+  const parentIsTTY = !!process.stdin.isTTY;
+  const child = spawn(process.execPath, [useGateway ? GATEWAY_TERM : NODE_SHELL], {
+    stdio: parentIsTTY ? "inherit" : ["pipe", "inherit", "inherit"],
+    env: { ...process.env, NODE_TERM_SELECTED_NODE_ID: node.nodeId },
+  });
+  if (parentIsTTY) {
+    // TTY:直接继承,node-shell 能用 raw mode 做 Tab 补全
+  } else {
+    // 非 TTY(管道):把已缓冲的行写进 child stdin
+    const buffered = lineQ.splice(0, lineQ.length).map((s) => s + "\n").join("");
+    child.stdin.write(buffered + "\n");
+    process.stdin.pipe(child.stdin);
+  }
+  child.on("close", (code) => {
+    console.log(`\n[已退出,退出码 ${code ?? 0}]`);
+    process.exit(code ?? 0);
+  });
 }
 
-// 把剩余 stdin 传给子进程;并把已选节点通过 env 直接传下去(不靠 profile 中转)
-process.stdin.pause();
-const parentIsTTY = !!process.stdin.isTTY;
-const child = spawn(process.execPath, [useGateway ? GATEWAY_TERM : NODE_SHELL], {
-  stdio: parentIsTTY ? "inherit" : ["pipe", "inherit", "inherit"],
-  env: { ...process.env, NODE_TERM_SELECTED_NODE_ID: node.nodeId },
-});
-if (parentIsTTY) {
-  // TTY:直接继承,node-shell 能用 raw mode 做 Tab 补全
-} else {
-  // 非 TTY(管道):把已缓冲的行写进 child stdin
-  const buffered = lineQ.splice(0, lineQ.length).map((s) => s + "\n").join("");
-  child.stdin.write(buffered + "\n");
-  process.stdin.pipe(child.stdin);
+// 选择循环:Windows 节点暂不支持,选到时提示并退回重选
+let chosen = null;
+while (chosen === null) {
+  if (!/^\d+$/.test(sel) || Number(sel) < 1 || Number(sel) > nodes.length) {
+    console.error("无效序号");
+    process.exit(2);
+  }
+  const n = nodes[Number(sel) - 1];
+  if ((n.platform || "").toLowerCase() === "windows") {
+    console.log(`暂不支持 Windows 节点(${n.displayName || n.nodeId}),请选择 linux 节点。`);
+    const again = (await ask(`选择序号 [1-${nodes.length}]: `)) ?? "";
+    sel = again;
+    continue;
+  }
+  chosen = n;
 }
-child.on("close", (code) => {
-  console.log(`\n[已退出,退出码 ${code ?? 0}]`);
-  process.exit(code ?? 0);
-});
+
+writeFileSync(PROFILE, JSON.stringify(chosen, null, 2));
+console.log(`→ 节点已选: ${chosen.displayName || chosen.nodeId}`);
+enterShell(chosen);

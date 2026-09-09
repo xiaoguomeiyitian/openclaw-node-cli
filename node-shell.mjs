@@ -68,9 +68,19 @@ if (!node) {
     if (nodes.length === 0) { console.log("无在线节点"); process.exit(1); }
     console.log("在线节点:");
     nodes.forEach((n, i) => console.log(`  ${i + 1}) ${n.displayName || n.nodeId}  (${n.platform || "?"})`));
-    const sel = (await ask(`选择序号 [1-${nodes.length}]: `)).trim();
-    if (!/^\d+$/.test(sel) || Number(sel) < 1 || Number(sel) > nodes.length) { console.error("无效序号"); process.exit(2); }
-    node = nodes[Number(sel) - 1];
+    // Windows 节点暂不支持,循环重选直到选到 linux 节点
+    let sel = (await ask(`选择序号 [1-${nodes.length}]: `)).trim();
+    while (true) {
+      if (!/^\d+$/.test(sel) || Number(sel) < 1 || Number(sel) > nodes.length) { console.error("无效序号"); process.exit(2); }
+      const n = nodes[Number(sel) - 1];
+      if ((n.platform || "").toLowerCase() === "windows") {
+        console.log(`暂不支持 Windows 节点(${n.displayName || n.nodeId}),请选择 linux 节点。`);
+        sel = (await ask(`选择序号 [1-${nodes.length}]: `)).trim();
+        continue;
+      }
+      node = n;
+      break;
+    }
     const { writeFileSync } = await import("node:fs");
     writeFileSync(PROFILE, JSON.stringify(node, null, 2));
   }
@@ -79,12 +89,14 @@ if (!node) {
 const nodeId = node.nodeId;
 const isWindows = (node.platform || "").toLowerCase() === "windows";
 
-console.log(`节点 shell:${node.displayName || nodeId} (${node.platform || "?"})`);
+// Windows 节点暂不支持:兜底拒绝(无论从哪个入口/残留 profile 进入)
 if (isWindows) {
-  console.log("说明:PowerShell 执行,cd 记住;Tab 补全目录/文件;↑↓ 历史;exit 退出。\n");
-} else {
-  console.log("说明:逐条执行,cd 记住;Tab 补全目录/文件;vim/htop 等全屏程序不可用;exit 退出。\n");
+  console.log(`暂不支持 Windows 节点(${node.displayName || nodeId})。请用 ./cli.sh 重新选择 linux 节点。`);
+  process.exit(1);
 }
+
+console.log(`节点 shell:${node.displayName || nodeId} (${node.platform || "?"})`);
+console.log("说明:逐条执行,cd 记住;Tab 补全目录/文件;vim/htop 等全屏程序不可用;exit 退出。\n");
 
 let cwd = "";
 
