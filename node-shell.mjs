@@ -90,9 +90,15 @@ let cwd = "";
 
 function promptNow() { return `\n${node.displayName || "node"}${cwd ? ":" + cwd : ""}$ `; }
 
+// shell 单引号转义:内含 ' $ ` " ; ( ) 一律字面安全。
+// ⚠ 不能用 JSON.stringify(双引号):bash 双引号里 $(...) 和 `...` 会被执行,存在命令注入!
+const shq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+
 function buildCommand(line) {
   if (isWindows) return line;
-  const prefix = cwd ? `cd ${JSON.stringify(cwd)} 2>/dev/null || true; ` : "";
+  const prefix = cwd
+    ? `cd ${shq(cwd)} 2>/dev/null || { printf '[目录不存在,已回退到家目录]\n' >&2; cd "$HOME" || true; }; `
+    : "";
   return `${prefix}${line}\n_rc=$?\nprintf '\\n__RC=%s__\\n' "$_rc"\npwd`;
 }
 
@@ -104,7 +110,11 @@ function parseOut(raw) {
     const rcLine = lines[lines.length - 2];
     const m = rcLine.match(/^__RC=(-?\d+)__$/);
     if (m && pwdLine.startsWith("/")) {
-      return { rc: Number(m[1]), cwd: pwdLine, display: lines.slice(0, -2).join("\n") + (lines.length > 2 ? "\n" : "") };
+      let body = lines.slice(0, -2);
+      // printf 前导 \n 造成的人为空行:去掉一个(真实输出末尾的空行保留一个)
+      if (body.length && body[body.length - 1] === "") body.pop();
+      const display = body.length ? body.join("\n") + "\n" : "";
+      return { rc: Number(m[1]), cwd: pwdLine, display };
     }
   }
   return { rc: null, cwd: null, display: text };
@@ -113,8 +123,9 @@ function parseOut(raw) {
 // ---- Tab 补全:发去节点跑 ls -d,取候选 ----
 async function completeToken(token) {
   if (isWindows) return null;
-  // 绝对路径(token 以 / 开头)不拼 cwd 前缀;相对路径才拼 cwd
-  const full = token.startsWith("/") ? token : (cwd ? `${cwd}/${token}` : token);
+  // 绝对路径不拼 cwd;~ 开头交给 bash 展开,不拼;其余相对路径才拼 cwd
+  const isTilde = token.startsWith("~");
+  const full = token.startsWith("/") || isTilde ? token : (cwd ? `${cwd}/${token}` : token);
   let dirPart, base;
   if (full.includes("/")) {
     dirPart = full.slice(0, full.lastIndexOf("/")) || "/";
@@ -123,11 +134,12 @@ async function completeToken(token) {
     dirPart = cwd || ".";
     base = token;
   }
-  // 关键:glob 的 * 不能用引号包,否则 shell 不会展开;只对目录部分做 shell 转义
-  const dirEscaped = dirPart.replace(/'/g, "'\\''");
-  const baseEscaped = base.replace(/'/g, "'\\''");
-  const dirPrefix = dirPart === "/" ? "/" : `${dirEscaped}/`;
-  const cmd = `ls -d1 ${dirPrefix}${baseEscaped}* 2>/dev/null || true`;
+  // 目录部分整段单引号包裹(shq);base 用 shq 后跟裸 *(引号紧贴 * 时 bash 仍会展开 glob,
+  // 但 $/` 等在引号内不再被执行 —— 防恶意文件名注入)。
+  // 注:glob 的 * 本身不能被引号包住,即引号须包 base 主体、* 留在引号外:bash 把
+  // 'fo'* 视为引号内字面 fo 接通配展开,行为与裸写 fo* 等价。
+  const dirQuoted = dirPart === "/" ? "/" : `${shq(dirPart)}/`;
+  const cmd = `ls -d1 ${dirQuoted}${shq(base)}* 2>/dev/null || true`;
   const res = await runOnNode({ nodeId, command: cmd, timeoutMs: 10000 });
   const entries = (res.stdout || "").split("\n").map((s) => s.trim()).filter(Boolean);
   if (!entries.length) return null;
@@ -253,6 +265,9 @@ async function runRawMode() {
     }
   };
 
+  let busy = false;            // 正在执行远端命令时缓冲输入,防并发执行
+  const backlog = [];          // 执行期间收到的按键
+
   const handleChar = async (ch) => {
     if (ch === "\r" || ch === "\n") {
       // 提交
@@ -262,8 +277,9 @@ async function runRawMode() {
       histIdx = -1; histDraft = "";
       if (line.trim() === "exit" || line.trim() === "quit") { shutdown(); return; }
       if (line.trim()) {
-        pushHistory(line);
-        await execLine(line);
+      pushHistory(line);
+      busy = true;
+      try { await execLine(line); } finally { busy = false; drainBacklog(); }
         process.stdout.write(promptNow());
       } else {
         process.stdout.write(promptNow());
@@ -300,7 +316,7 @@ async function runRawMode() {
     } else if (ch >= " " && ch !== "\x7f") { // 可打印字符
       lineBuf = lineBuf.slice(0, cursor) + ch + lineBuf.slice(cursor);
       cursor++;
-      process.stdout.write(ch);
+      redraw(); // 光标中间插入时,终端覆盖式写字符会吃掉后一个字符,必须重绘
     }
   };
 
@@ -312,6 +328,8 @@ async function runRawMode() {
   const ESC_SEQS = {
     "\x1b[A": "up", "\x1b[B": "down",
     "\x1b[C": "right", "\x1b[D": "left",
+    "\x1bOA": "up", "\x1bOB": "down",   // SS3 变体(application cursor mode 下部分终端发送)
+    "\x1bOC": "right", "\x1bOD": "left",
     "\x1b[H": "home", "\x1b[F": "end",
     "\x1b[1~": "home", "\x1b[4~": "end", "\x1b[3~": "delete"
   };
@@ -326,6 +344,7 @@ async function runRawMode() {
   };
 
   const dispatch = (chunk) => {
+    if (busy) { backlog.push(chunk); return; } // 命令执行期间只缓冲不消费(顺序执行,防并发)
     for (const ch of chunk) {
       if (escBuf) {
         escBuf += ch;
@@ -341,6 +360,13 @@ async function runRawMode() {
         continue;
       }
       handleChar(ch);
+    }
+  };
+
+  const drainBacklog = () => {
+    while (backlog.length) {
+      const chunk = backlog.shift();
+      for (const ch of chunk) handleChar(ch);
     }
   };
 
@@ -378,8 +404,8 @@ async function runRawMode() {
 
   function isDirectory(name) {
     // name 可能是补全出的相对名字;判断时同样区分绝对/相对路径
-    const p = name.startsWith("/") ? name : (cwd ? cwd + "/" + name : name);
-    return runOnNode({ nodeId, command: `[ -d ${JSON.stringify(p)} ] && echo yes || echo no`, timeoutMs: 5000 })
+    const p = name.startsWith("/") || name.startsWith("~") ? name : (cwd ? cwd + "/" + name : name);
+    return runOnNode({ nodeId, command: `[ -d ${shq(p)} ] && echo yes || echo no`, timeoutMs: 5000 })
       .then((r) => (r.stdout || "").trim() === "yes");
   }
 

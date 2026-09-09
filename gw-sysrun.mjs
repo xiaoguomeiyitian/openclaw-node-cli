@@ -2,6 +2,7 @@
 // 与 node-exec / gateway-term 同目录。零第三方依赖(Node v24 内置 WebSocket)。
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -91,7 +92,9 @@ export function runOnNode({ nodeId, command, cwd = "", timeoutMs = 900000 }) {
 }
 
 // 直接运行时:argv[2]=nodeId argv[3]=command
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+// 注意用 pathToFileURL 比较:直接写 file://+path 会在相对路径调用(node ./gw-sysrun.mjs)时
+// 不相等(缺绝对路径解析),导致直连模式静默失效。
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [, , nodeId, ...rest] = process.argv;
   if (!nodeId || rest.length === 0) { console.error("用法: gw-sysrun.mjs <nodeId> <command...>"); process.exit(2); }
   runOnNode({ nodeId, command: rest.join(" ") })
