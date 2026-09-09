@@ -25,7 +25,10 @@
 ./cli.sh --gateway
 
 # 单条转发命令到已选节点
-./node-exec bash /home/code/server_dev/buildwaice.sh 2
+./node-exec ls -la
+./node-exec 'svn info'
+./node-exec 'docker ps'
+./node-exec 'echo hello && hostname'
 ```
 
 ## 说明
