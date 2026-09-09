@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runOnNode } from "./gw-sysrun.mjs";
+import { getClient } from "./gw-client.mjs";
 
 const DIR = dirname(fileURLToPath(import.meta.url));
 const PROFILE = join(DIR, ".node-term-profile.json");
@@ -245,6 +246,13 @@ if (isTTY) {
   await runRawMode();
 } else {
   await runLineMode();
+}
+// 关闭连接池,避免复用衱向 keep-alive WS 卡住事件循环导致进程不退出
+closeClient();
+
+function closeClient() {
+  try { getClient().close(); } catch {}
+  process.exit(0);
 }
 
 async function runLineMode() {
@@ -493,6 +501,7 @@ async function runRawMode() {
 
   function shutdown() {
     try { stdin.setRawMode && stdin.setRawMode(false); } catch {}
+    try { getClient().close(); } catch {}
     process.exit(0);
   }
 
