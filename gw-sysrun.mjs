@@ -68,10 +68,13 @@ export function runOnNode({ nodeId, command, cwd = "", timeoutMs = 900000, platf
           auth: { password }, caps: [], commands: []
         });
         // system.run 走底层 node.invoke;command 需为 argv 数组,复合命令用 shell 包装:
-        // linux/mac: bash -lc(登录 shell,环境变量齐全);windows: cmd /d /c(禁用 AutoRun,
-        // 复合命令 && || 等由 cmd 解释)
+        // linux/mac: bash -lc(登录 shell,环境变量齐全)
+        // windows: powershell -NoProfile -NonInteractive -Command
+        //   - -NoProfile 不加载用户 profile(快 + 防意外预执行)
+        //   - -NonInteractive 防挂起;命令用 PS 语法($env:VAR、; 分隔;PS7 才有 &&)
+        //   - 现代均内置 Windows PowerShell 5.1;如需 pwsh 7+ 变体另行加 system.which 探测
         const argv = (platform || "").toLowerCase() === "windows"
-          ? ["cmd", "/d", "/c", command]
+          ? ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
           : ["bash", "-lc", command];
         const invokeParams = {
           command: argv,
