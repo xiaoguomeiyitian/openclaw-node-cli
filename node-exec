@@ -1,0 +1,38 @@
+#!/usr/bin/env node
+// node-exec — 把命令转发到 node-term 所选节点(与 node-term 同目录)
+// 用法: node-exec <命令...>   例: node-exec bash buildwaice.sh 2
+// 原理:读取同目录 .node-term-profile.json 记住的 nodeId,经 exec 通道转节点执行。
+import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const DIR = dirname(fileURLToPath(import.meta.url));
+const PROFILE = join(DIR, ".node-term-profile.json");
+
+let node;
+try { node = JSON.parse(readFileSync(PROFILE, "utf8")); } catch {
+  console.error("先运行 node-term.mjs 选择节点");
+  process.exit(1);
+}
+
+const cmd = process.argv.slice(2);
+if (cmd.length === 0) {
+  console.error("用法: node-exec <命令...>");
+  process.exit(2);
+}
+
+// 节点 shell 执行经 Gateway 转发;这里用 openclaw 的 exec 无 shell 命令不可直接,
+// 走 agent 的一次性 exec 语义:执行远端命令并回传 stdout/stderr/exitCode。
+// 实现:通过 node 内置直连 Gateway WS 发 node.invoke(system.run),与 gateway-term 同源。
+// 注意:system.run 需节点 approval 为 full(默认已配),由 exec 通道的审批语义覆盖。
+const { nodeId } = node;
+import("./gw-sysrun.mjs").then(async (m) => {
+  const res = await m.runOnNode({ nodeId, command: cmd.join(" ") });
+  if (res.stdout) process.stdout.write(res.stdout);
+  if (res.stderr) process.stderr.write(res.stderr);
+  process.exit(res.exitCode ?? (res.ok ? 0 : 1));
+}).catch((e) => {
+  console.error("执行失败:", e.message);
+  process.exit(1);
+});

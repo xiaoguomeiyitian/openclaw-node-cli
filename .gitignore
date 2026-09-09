@@ -1,0 +1,7 @@
+# 本机状态 / 敏感信息
+.node-term-profile.json
+gw-pass
+.openclaw-gw-pass
+
+# Node
+node_modules/
