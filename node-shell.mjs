@@ -208,8 +208,8 @@ async function runRawMode() {
   };
 
   const redraw = () => {
-    // 清行 + 重绘
-    process.stdout.write(`\r${promptNow().replace(/^\n/, "")}` + lineBuf + " \b");
+    // 清行 + 重绘:\r 回行首 → prompt+lineBuf → \x1b[K 清到行尾(旧行比新行长时必须清残留)→ 光标定位
+    process.stdout.write(`\r${promptNow().replace(/^\n/, "")}${lineBuf}\x1b[K`);
     // 光标定位
     const move = lineBuf.length - cursor;
     if (move > 0) process.stdout.write(`\x1b[${move}D`);
