@@ -244,13 +244,11 @@ const isTTY = !!process.stdin.isTTY;
 
 if (isTTY) {
   await runRawMode();
+  // TTY 模式是事件驱动:runRawMode 注册完 stdin 监听器即返回,进程靠事件循环存活,
+  // 退出路径在 shutdown()(exit/Ctrl-D/EOF)里 close+exit,不能在这里退出。
 } else {
   await runLineMode();
-}
-// 关闭连接池,避免复用衱向 keep-alive WS 卡住事件循环导致进程不退出
-closeClient();
-
-function closeClient() {
+  // 管道模式:行循环到 EOF 才到这里,关闭连接池(keep-alive WS 会卡住事件循环)并退出
   try { getClient().close(); } catch {}
   process.exit(0);
 }
@@ -430,9 +428,16 @@ async function runRawMode() {
     return isPrefix ? null : undefined;
   };
 
-  const dispatch = (chunk) => {
-    if (busy) { backlog.push(chunk); return; } // 命令执行期间只缓冲不消费(顺序执行,防并发)
-    for (const ch of chunk) {
+  // 字符流处理器:busy 检查必须在字符级,不能只在 chunk 级 ——
+  // 粘贴多行时同一 chunk 含「命令\r + 后续字符」,\r 提交后 busy=true,
+  // 剩余字符若继续消费会被立即当作下一命令执行(如把 exit 在执行中杀掉)。
+  const processChunk = (chunk) => {
+    for (let i = 0; i < chunk.length; i++) {
+      if (busy) {
+        if (i < chunk.length) backlog.unshift(chunk.slice(i)); // 剩余字符压回 backlog 前端
+        return;
+      }
+      const ch = chunk[i];
       if (escBuf) {
         escBuf += ch;
         const key = resolveEscape(escBuf);
@@ -450,10 +455,15 @@ async function runRawMode() {
     }
   };
 
+  const dispatch = (chunk) => {
+    if (busy) { backlog.push(chunk); return; } // 快路径:整块缓冲
+    processChunk(chunk);
+  };
+
   const drainBacklog = () => {
-    while (backlog.length) {
+    while (backlog.length && !busy) {
       const chunk = backlog.shift();
-      for (const ch of chunk) handleChar(ch);
+      processChunk(chunk);
     }
   };
 
